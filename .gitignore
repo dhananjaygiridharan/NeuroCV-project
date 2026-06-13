@@ -1,0 +1,15 @@
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local caches
+__pycache__/
+*.pyc
+
+# Generated runtime data
+neuro_env/neuro_focus_data.csv

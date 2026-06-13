@@ -3,6 +3,10 @@ import numpy as np
 import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
+import csv
+import time
+from collections import deque
+import os
 
 print("\n--- Initializing Neuro-Focus Tracking Engine ---")
 
@@ -26,6 +30,16 @@ FRAME_DEBOUNCE_LIMIT = 3     # Eyes must stay closed for at least 3 frames to co
 blink_counter = 0            # Tracks your total score of blinks
 frame_counter = 0            # Counts consecutive frames where eyelids are shut
 
+
+start_time = time.perf_counter()  # Start the timer for session duration tracking
+blink_times = deque()  # A deque to store timestamps of recent blinks for rate calculation
+last_log_time = time.perf_counter() # Timer to manage periodic logging intervals
+
+window_seconds = 60 # Time window for calculating blinks per minute
+log_interval_seconds = 5    # Log data every 5 seconds for quick validation during testing
+bpm = 0.0 # Initialize BPM variable
+state = "Neutral State" # Initialize cognitive state variable
+CSV_PATH = os.path.join(os.path.dirname(__file__), "neuro_focus_data.csv")
 
 #Function to compute the Eye Aspect Ratio (EAR) using Euclidean distance
 def calculate_EAR(eye_landmarks, img_w, img_h):
@@ -57,6 +71,43 @@ cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
 cv2.namedWindow('Neuro-Focus Tasks Window', cv2.WINDOW_NORMAL)
 
+def attention_classifier(avg_ear, bpm, total_blinks):
+    # Avoid a false "High Focus" label at startup before real blink data exists.
+    if total_blinks == 0 and bpm == 0:
+        return "Neutral State"
+
+    if avg_ear < 0.18:
+        return "Fatigue Present/High sEBR"
+    if avg_ear > EAR_THRESHOLD and bpm < 12:
+        return "High Focus/Inhibited sEBR"
+    return "Neutral State"
+    
+def append_to_csv(timestamp, total_blinks, bpm, mean_ear, state):
+    file_exists = os.path.isfile(CSV_PATH)
+
+    with open(CSV_PATH, "a", newline="") as f:
+        writer = csv.writer(f)
+
+        if not file_exists:
+            writer.writerow([
+                "Timestamp",
+                "Total_Blinks",
+                "Realtime_BPM",
+                "Mean_EAR",
+                "Cognitive_State"
+            ])
+
+        writer.writerow([
+            timestamp,
+            total_blinks,
+            f"{bpm:.2f}",
+            f"{mean_ear:.4f}",
+            state
+        ])
+
+
+
+
 while cap.isOpened():
     success, frame = cap.read()
     if not success: continue
@@ -85,10 +136,27 @@ while cap.isOpened():
             # Eyelids are open! Check if they were just closed long enough for a valid blink
             if frame_counter >= FRAME_DEBOUNCE_LIMIT:
                 blink_counter += 1
-                print(f"Blink Registered! Total Count: {blink_counter}")
+
+                while blink_times and time.perf_counter() - blink_times[0] > window_seconds:
+                    blink_times.popleft()  # Remove blinks outside the time window
+
+                blink_times.append(time.perf_counter())  # Record the timestamp of the blink
+                bpm = (len(blink_times) / 60.0) * 60  # Calculate blinks per minute
             
             # Reset the frame counter to 0 since your eyes are now open
             frame_counter = 0
+
+        state = attention_classifier(avg_ear, bpm, blink_counter)
+
+        if time.perf_counter() - last_log_time >= log_interval_seconds:
+            append_to_csv(
+                time.strftime("%Y-%m-%d %H:%M:%S"),
+                blink_counter,
+                bpm,
+                avg_ear,
+                state
+            )
+            last_log_time = time.perf_counter()
 
         # --- JARVIS EYE TARGETING RETICLES ---
         # Draw crosshairs on the Left Eye points
@@ -107,11 +175,14 @@ while cap.isOpened():
             cv2.drawMarker(frame, (x, y), (255, 255, 0), cv2.MARKER_CROSS, markerSize=12, thickness=1)
         
         # Put visual indicator text on the screen
-        cv2.putText(frame, f"AVG EAR: {avg_ear:.2f}", (30, 50), 
+        cv2.putText(frame, f"Mean EAR: {avg_ear:.4f}", (30, 50),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 160, 0), 2)
-        # Draw the Blink Score HUD overlay right below the EAR text
-        cv2.putText(frame, f"Blinks: {blink_counter}", (30, 100), 
+        cv2.putText(frame, f"Total Blinks: {blink_counter}", (30, 95),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)
+        cv2.putText(frame, f"Realtime BPM: {bpm:.2f}", (30, 140),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+        cv2.putText(frame, f"Cognitive State: {state}", (30, 185),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 150), 2)
         
     # --- HUD CORNER BRACKETS ---
     # Top-Left Corner Brackets (X, Y)
