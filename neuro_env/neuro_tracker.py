@@ -62,8 +62,8 @@ def calculate_EAR(eye_landmarks, img_w, img_h, face_landmarks):
 
 # Open connection to the default hardware webcam (0)
 cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1552)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1552)
 cv2.namedWindow('Neuro-Focus Tasks Window', cv2.WINDOW_NORMAL)
 
 def attention_classifier(bpm, baseline_bpm, avg_blink_duration, total_blinks, bpm_drop_threshold=0.85, duration_threshold=0.4):
