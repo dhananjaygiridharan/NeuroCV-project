@@ -25,11 +25,16 @@ LEFT_EYE_IDX = [33, 133, 160, 144, 158, 153]
 RIGHT_EYE_IDX = [362, 263, 385, 380, 387, 373]
 
 # --- STATE MACHINE CONFIGURATION ---
-EAR_THRESHOLD = 0.24         # The "line in the sand" — anything below this is a closed eye
+EAR_THRESHOLD = 0.24         # Anything below this is a closed eye
 FRAME_DEBOUNCE_LIMIT = 3     # Eyes must stay closed for at least 3 frames to count
 blink_counter = 0            # Tracks your total score of blinks
 frame_counter = 0            # Counts consecutive frames where eyelids are shut
 
+# --- NEW VARIABLES FOR DETERMINISTIC LOGIC ---
+BASELINE_BPM = 15.0          # Set this to your normal resting blinks per minute
+blink_durations = deque(maxlen=5) # Stores the duration of the last 5 blinks for a rolling average
+avg_blink_duration = 0.0     # Initialize rolling average variable
+current_blink_start = 0.0    # Timer for when a blink begins
 
 start_time = time.perf_counter()  # Start the timer for session duration tracking
 blink_times = deque()  # A deque to store timestamps of recent blinks for rate calculation
@@ -41,27 +46,17 @@ bpm = 0.0 # Initialize BPM variable
 state = "Neutral State" # Initialize cognitive state variable
 CSV_PATH = os.path.join(os.path.dirname(__file__), "neuro_focus_data.csv")
 
-#Function to compute the Eye Aspect Ratio (EAR) using Euclidean distance
-def calculate_EAR(eye_landmarks, img_w, img_h):
-    # Convert the 6 specific landmark points into scaled X, Y pixel arrays
+# Function to compute the Eye Aspect Ratio (EAR) using Euclidean distance
+def calculate_EAR(eye_landmarks, img_w, img_h, face_landmarks):
     points = []
     for idx in eye_landmarks:
         pt = face_landmarks[idx]
         points.append(np.array([pt.x * img_w, pt.y * img_h]))
     
-    # Extract points based on our list order:
-    # points[0]=P1 (outer), points[1]=P4 (inner)
-    # points[2]=P2, points[3]=P6 (vertical pair 1)
-    # points[4]=P3, points[5]=P5 (vertical pair 2)
-    
-    # Calculate vertical distances
     v1 = np.linalg.norm(points[2] - points[3])
     v2 = np.linalg.norm(points[4] - points[5])
-    
-    # Calculate horizontal distance
     h = np.linalg.norm(points[0] - points[1])
     
-    # Compute the scale-invariant ratio
     ear = (v1 + v2) / (2.0 * h)
     return ear
 
@@ -71,15 +66,23 @@ cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
 cv2.namedWindow('Neuro-Focus Tasks Window', cv2.WINDOW_NORMAL)
 
-def attention_classifier(avg_ear, bpm, total_blinks):
-    # Avoid a false "High Focus" label at startup before real blink data exists.
+def attention_classifier(bpm, baseline_bpm, avg_blink_duration, total_blinks, bpm_drop_threshold=0.85, duration_threshold=0.4):
+    """
+    Categorizes cognitive load deterministically based on BPM drops and blink duration.
+    """
     if total_blinks == 0 and bpm == 0:
         return "Neutral State"
 
-    if avg_ear < 0.18:
-        return "Fatigue Present/High sEBR"
-    if avg_ear > EAR_THRESHOLD and bpm < 12:
+    cond_focus = bpm < (baseline_bpm * bpm_drop_threshold)
+    cond_fatigue = avg_blink_duration >= duration_threshold
+    
+    if cond_focus and cond_fatigue:
+        return "High Focus & Fatigue Present"
+    elif cond_focus:
         return "High Focus/Inhibited sEBR"
+    elif cond_fatigue:
+        return "Fatigue Present"
+    
     return "Neutral State"
     
 def append_to_csv(timestamp, total_blinks, bpm, mean_ear, state):
@@ -105,9 +108,6 @@ def append_to_csv(timestamp, total_blinks, bpm, mean_ear, state):
             state
         ])
 
-
-
-
 while cap.isOpened():
     success, frame = cap.read()
     if not success: continue
@@ -122,32 +122,43 @@ while cap.isOpened():
         face_landmarks = detection_result.face_landmarks[0]
         
         # Calculate individual EAR values
-        left_ear = calculate_EAR(LEFT_EYE_IDX, img_w, img_h)
-        right_ear = calculate_EAR(RIGHT_EYE_IDX, img_w, img_h)
+        left_ear = calculate_EAR(LEFT_EYE_IDX, img_w, img_h, face_landmarks)
+        right_ear = calculate_EAR(RIGHT_EYE_IDX, img_w, img_h, face_landmarks)
         
-        # Task 3: Average the EAR outputs to protect against head rotation artifacts
         avg_ear = (left_ear + right_ear) / 2.0
         
         # --- THE TEMPORAL STATE MACHINE LOGIC ---
         if avg_ear < EAR_THRESHOLD:
-            # Eyelids are closed! Tick the consecutive frame timer up by 1
+            if frame_counter == 0:
+                current_blink_start = time.perf_counter()
             frame_counter += 1
         else:
-            # Eyelids are open! Check if they were just closed long enough for a valid blink
             if frame_counter >= FRAME_DEBOUNCE_LIMIT:
                 blink_counter += 1
+                
+                blink_end_time = time.perf_counter()
+                duration = blink_end_time - current_blink_start
+                blink_durations.append(duration)
+                
+                avg_blink_duration = sum(blink_durations) / len(blink_durations)
 
                 while blink_times and time.perf_counter() - blink_times[0] > window_seconds:
-                    blink_times.popleft()  # Remove blinks outside the time window
+                    blink_times.popleft()
 
-                blink_times.append(time.perf_counter())  # Record the timestamp of the blink
-                bpm = (len(blink_times) / 60.0) * 60  # Calculate blinks per minute
+                blink_times.append(blink_end_time)
+                bpm = (len(blink_times) / window_seconds) * 60.0
             
-            # Reset the frame counter to 0 since your eyes are now open
             frame_counter = 0
 
-        state = attention_classifier(avg_ear, bpm, blink_counter)
+        # Run deterministic classifier
+        state = attention_classifier(
+            bpm=bpm, 
+            baseline_bpm=BASELINE_BPM, 
+            avg_blink_duration=avg_blink_duration, 
+            total_blinks=blink_counter
+        )
 
+        # --- CSV LOGGING INTERVAL (RESTORED) ---
         if time.perf_counter() - last_log_time >= log_interval_seconds:
             append_to_csv(
                 time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -159,35 +170,33 @@ while cap.isOpened():
             last_log_time = time.perf_counter()
 
         # --- JARVIS EYE TARGETING RETICLES ---
-        # Draw crosshairs on the Left Eye points
         for idx in LEFT_EYE_IDX:
             pt = face_landmarks[idx]
             x = int(pt.x * img_w)
             y = int(pt.y * img_h)
-            # MARKER_CROSS creates a precise cybernetic crosshair target
             cv2.drawMarker(frame, (x, y), (255, 255, 0), cv2.MARKER_CROSS, markerSize=12, thickness=1)
 
-        # Draw crosshairs on the Right Eye points
         for idx in RIGHT_EYE_IDX:
             pt = face_landmarks[idx]
             x = int(pt.x * img_w)
             y = int(pt.y * img_h)
             cv2.drawMarker(frame, (x, y), (255, 255, 0), cv2.MARKER_CROSS, markerSize=12, thickness=1)
         
-        # Put visual indicator text on the screen
+        # UI Information HUD
         cv2.putText(frame, f"Mean EAR: {avg_ear:.4f}", (30, 50),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 160, 0), 2)
         cv2.putText(frame, f"Total Blinks: {blink_counter}", (30, 95),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)
         cv2.putText(frame, f"Realtime BPM: {bpm:.2f}", (30, 140),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
-        cv2.putText(frame, f"Cognitive State: {state}", (30, 185),
+        cv2.putText(frame, f"Avg Blink Duration: {avg_blink_duration:.2f}s", (30, 185),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 255), 2)
+        cv2.putText(frame, f"Cognitive State: {state}", (30, 230),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 150), 2)
         
-    # --- HUD CORNER BRACKETS ---
-    # Top-Left Corner Brackets (X, Y)
-    cv2.line(frame, (20, 20), (100, 20), (255, 160, 0), 2)  # Horizontal line
-    cv2.line(frame, (20, 20), (20, 100), (255, 160, 0), 2)  # Vertical line
+    # HUD Corner Brackets
+    cv2.line(frame, (20, 20), (100, 20), (255, 160, 0), 2)
+    cv2.line(frame, (20, 20), (20, 100), (255, 160, 0), 2)
     
     cv2.imshow('Neuro-Focus Tasks Window', frame)
     if cv2.waitKey(1) & 0xFF == ord('q'): break
