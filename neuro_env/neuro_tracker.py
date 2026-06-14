@@ -146,12 +146,16 @@ while cap.isOpened():
         avg_ear = (left_ear + right_ear) / 2.0
         if not is_calibrated:
             if elapsed_time <= calibration_duration:
-                calibration_ear_scores.append(avg_ear)
+                if len(calibration_ear_scores) < 5:
+                    calibration_ear_scores.append(avg_ear)
+                else:
+                    if avg_ear > np.mean(calibration_ear_scores) * 0.8:
+                        calibration_ear_scores.append(avg_ear)
                 calibration_ui_text = f"Calibrating... {calibration_duration - elapsed_time:.1f}s left"
             else:
                 mean_open_ear = sum(calibration_ear_scores) / len(calibration_ear_scores)
                 EAR_THRESHOLD = mean_open_ear * 0.75
-                Baseline_BPM = 15.0
+                BASELINE_BPM = 15.0
                 is_calibrated = True
 
         else:
