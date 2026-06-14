@@ -41,7 +41,13 @@ blink_durations = deque(maxlen=5) # Stores the duration of the last 5 blinks for
 avg_blink_duration = 0.0     # Initialize rolling average variable
 current_blink_start = 0.0    # Timer for when a blink begins
 
-start_time = time.perf_counter()  # Start the timer for session duration tracking
+# High-precision timer for elapsed session duration
+start_perf = time.perf_counter()
+
+# Actual wall-clock time when the session started
+start_clock_str = time.strftime("%I:%M:%S %p", time.localtime())
+
+
 blink_times = deque()  # A deque to store timestamps of recent blinks for rate calculation
 last_log_time = time.perf_counter() # Timer to manage periodic logging intervals
 
@@ -127,7 +133,7 @@ while cap.isOpened():
     detection_result = detector.detect(mp_image)
     img_h, img_w, _ = frame.shape
 
-    elapsed_time = time.perf_counter() - start_time
+    elapsed_time = time.perf_counter() - start_perf
 
     
     if detection_result.face_landmarks:
@@ -190,19 +196,6 @@ while cap.isOpened():
                 state
             )
             last_log_time = time.perf_counter()
-
-        # --- JARVIS EYE TARGETING RETICLES ---
-        for idx in LEFT_EYE_IDX:
-            pt = face_landmarks[idx]
-            x = int(pt.x * img_w)
-            y = int(pt.y * img_h)
-            cv2.drawMarker(frame, (x, y), (255, 255, 0), cv2.MARKER_CROSS, markerSize=12, thickness=1)
-
-        for idx in RIGHT_EYE_IDX:
-            pt = face_landmarks[idx]
-            x = int(pt.x * img_w)
-            y = int(pt.y * img_h)
-            cv2.drawMarker(frame, (x, y), (255, 255, 0), cv2.MARKER_CROSS, markerSize=12, thickness=1)
         
         # UI Information HUD
         text_to_display = state if is_calibrated else calibration_ui_text
@@ -222,7 +215,6 @@ while cap.isOpened():
 
             # --- BOTTOM RIGHT TELEMETRY HUD ---
         # 1. Format the absolute start time into a readable string
-        start_clock_str = time.strftime("%H:%M:%S", time.localtime(start_time))
         
         # 2. Convert raw elapsed seconds into hours, minutes, and seconds
         m, s = divmod(int(elapsed_time), 60)
