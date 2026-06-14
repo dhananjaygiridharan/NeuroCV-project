@@ -30,6 +30,11 @@ FRAME_DEBOUNCE_LIMIT = 3     # Eyes must stay closed for at least 3 frames to co
 blink_counter = 0            # Tracks your total score of blinks
 frame_counter = 0            # Counts consecutive frames where eyelids are shut
 
+calibration_duration = 5.0
+is_calibrated = False
+calibration_ear_scores = [] 
+
+
 # --- NEW VARIABLES FOR DETERMINISTIC LOGIC ---
 BASELINE_BPM = 15.0          # Set this to your normal resting blinks per minute
 blink_durations = deque(maxlen=5) # Stores the duration of the last 5 blinks for a rolling average
@@ -66,7 +71,10 @@ cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1552)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1552)
 cv2.namedWindow('Neuro-Focus Tasks Window', cv2.WINDOW_NORMAL)
 
-def attention_classifier(bpm, baseline_bpm, avg_blink_duration, total_blinks, bpm_drop_threshold=0.85, duration_threshold=0.4):
+def attention_classifier(bpm, baseline_bpm, avg_blink_duration, total_blinks, bpm_drop_threshold=0.85, duration_threshold=0.4, is_calibrated=True):
+    if not is_calibrated:
+        return "Calibrating Baseline..."
+    
     """
     Categorizes cognitive load deterministically based on BPM drops and blink duration.
     """
@@ -108,6 +116,7 @@ def append_to_csv(timestamp, total_blinks, bpm, mean_ear, state):
             state
         ])
 
+
 while cap.isOpened():
     success, frame = cap.read()
     if not success: continue
@@ -118,6 +127,9 @@ while cap.isOpened():
     detection_result = detector.detect(mp_image)
     img_h, img_w, _ = frame.shape
 
+    elapsed_time = time.perf_counter() - start_time
+
+    
     if detection_result.face_landmarks:
         face_landmarks = detection_result.face_landmarks[0]
         
@@ -126,29 +138,39 @@ while cap.isOpened():
         right_ear = calculate_EAR(RIGHT_EYE_IDX, img_w, img_h, face_landmarks)
         
         avg_ear = (left_ear + right_ear) / 2.0
-        
-        # --- THE TEMPORAL STATE MACHINE LOGIC ---
-        if avg_ear < EAR_THRESHOLD:
-            if frame_counter == 0:
-                current_blink_start = time.perf_counter()
-            frame_counter += 1
+        if not is_calibrated:
+            if elapsed_time <= calibration_duration:
+                calibration_ear_scores.append(avg_ear)
+                calibration_ui_text = f"Calibrating... {calibration_duration - elapsed_time:.1f}s left"
+            else:
+                mean_open_ear = sum(calibration_ear_scores) / len(calibration_ear_scores)
+                EAR_THRESHOLD = mean_open_ear * 0.75
+                Baseline_BPM = 15.0
+                is_calibrated = True
+
         else:
-            if frame_counter >= FRAME_DEBOUNCE_LIMIT:
-                blink_counter += 1
-                
-                blink_end_time = time.perf_counter()
-                duration = blink_end_time - current_blink_start
-                blink_durations.append(duration)
-                
-                avg_blink_duration = sum(blink_durations) / len(blink_durations)
+        # --- THE TEMPORAL STATE MACHINE LOGIC ---
+            if avg_ear < EAR_THRESHOLD:
+                if frame_counter == 0:
+                    current_blink_start = time.perf_counter()
+                frame_counter += 1
+            else:
+                if frame_counter >= FRAME_DEBOUNCE_LIMIT:
+                    blink_counter += 1
+                        
+                    blink_end_time = time.perf_counter()
+                    duration = blink_end_time - current_blink_start
+                    blink_durations.append(duration)
+                        
+                    avg_blink_duration = sum(blink_durations) / len(blink_durations)
 
-                while blink_times and time.perf_counter() - blink_times[0] > window_seconds:
-                    blink_times.popleft()
+                    while blink_times and time.perf_counter() - blink_times[0] > window_seconds:
+                        blink_times.popleft()
 
-                blink_times.append(blink_end_time)
-                bpm = (len(blink_times) / window_seconds) * 60.0
-            
-            frame_counter = 0
+                    blink_times.append(blink_end_time)
+                    bpm = (len(blink_times) / window_seconds) * 60.0
+                    
+                frame_counter = 0
 
         # Run deterministic classifier
         state = attention_classifier(
@@ -183,6 +205,9 @@ while cap.isOpened():
             cv2.drawMarker(frame, (x, y), (255, 255, 0), cv2.MARKER_CROSS, markerSize=12, thickness=1)
         
         # UI Information HUD
+        text_to_display = state if is_calibrated else calibration_ui_text
+        hud_color = (0, 255, 150) if is_calibrated else (0, 165, 255)
+
         cv2.putText(frame, f"Mean EAR: {avg_ear:.4f}", (30, 50),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 160, 0), 2)
         cv2.putText(frame, f"Total Blinks: {blink_counter}", (30, 95),
@@ -191,9 +216,33 @@ while cap.isOpened():
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
         cv2.putText(frame, f"Avg Blink Duration: {avg_blink_duration:.2f}s", (30, 185),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 255), 2)
-        cv2.putText(frame, f"Cognitive State: {state}", (30, 230),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 150), 2)
+        cv2.putText(frame, f"Cognitive State: {text_to_display}", (30, 230),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, hud_color, 2)
         
+
+            # --- BOTTOM RIGHT TELEMETRY HUD ---
+        # 1. Format the absolute start time into a readable string
+        start_clock_str = time.strftime("%H:%M:%S", time.localtime(start_time))
+        
+        # 2. Convert raw elapsed seconds into hours, minutes, and seconds
+        m, s = divmod(int(elapsed_time), 60)
+        h, m = divmod(m, 60)
+        elapsed_str = f"{h:02d}:{m:02d}:{s:02d}"
+        
+        # 3. Create the text strings
+        start_text = f"Session Start: {start_clock_str}"
+        elapsed_text = f"Elapsed Time: {elapsed_str}"
+        
+        # 4. Dynamically calculate X position so the text pushes left from the right edge
+        # (Assuming standard fonts, we offset by about 450 pixels from the right margin)
+        hud_x_position = max(img_w - 450, 30) 
+        
+        # 5. Render the strings onto the bottom right screen space
+        cv2.putText(frame, start_text, (hud_x_position, img_h - 80),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 160, 0), 2)
+        cv2.putText(frame, elapsed_text, (hud_x_position, img_h - 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+       
     # HUD Corner Brackets
     cv2.line(frame, (20, 20), (100, 20), (255, 160, 0), 2)
     cv2.line(frame, (20, 20), (20, 100), (255, 160, 0), 2)
